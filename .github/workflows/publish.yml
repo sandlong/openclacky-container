@@ -3,19 +3,17 @@ name: Publish container
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      openclacky_version:
-        description: "Upstream OpenClacky version, without the v prefix"
-        required: false
-        type: string
+  schedule:
+    # Check the official image daily; scheduled runs publish only after it changes.
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
   packages: write
 
 env:
+  OFFICIAL_IMAGE: ghcr.io/clacky-ai/openclacky:latest
   IMAGE_NAME: openclacky
 
 jobs:
@@ -26,42 +24,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve version and tags
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve upstream and publication metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ inputs.openclacky_version }}"
-          if [ -z "$VERSION" ] && [ "${GITHUB_REF_TYPE}" = "tag" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          if [ -z "$VERSION" ]; then
-            VERSION="$(tr -d '[:space:]' < OPENCLACKY_VERSION)"
-          fi
-
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           IMAGE="ghcr.io/${OWNER_LC}/${IMAGE_NAME}"
+          UPSTREAM_DIGEST="$(docker buildx imagetools inspect "$OFFICIAL_IMAGE" | awk '/^Digest:/ {print $2; exit}')"
+          UPSTREAM_SHORT="${UPSTREAM_DIGEST#sha256:}"
+          UPSTREAM_SHORT="${UPSTREAM_SHORT:0:12}"
+
+          docker pull --platform linux/amd64 "$OFFICIAL_IMAGE" >/dev/null
+          UPSTREAM_VERSION="$(docker run --rm --platform linux/amd64 --entrypoint ruby "$OFFICIAL_IMAGE" \
+            -e 'require "clacky"; print Clacky::VERSION')"
+
+          CURRENT_BASE_DIGEST=""
+          if docker pull --platform linux/amd64 "${IMAGE}:latest" >/dev/null 2>&1; then
+            CURRENT_BASE_DIGEST="$(docker image inspect "${IMAGE}:latest" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.base.digest" }}' 2>/dev/null || true)"
+          fi
+
+          SHOULD_PUBLISH=true
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$CURRENT_BASE_DIGEST" = "$UPSTREAM_DIGEST" ]; then
+            SHOULD_PUBLISH=false
+          fi
 
           {
-            echo "version=${VERSION}"
             echo "image=${IMAGE}"
+            echo "upstream_digest=${UPSTREAM_DIGEST}"
+            echo "upstream_version=${UPSTREAM_VERSION}"
+            echo "should_publish=${SHOULD_PUBLISH}"
             echo "tags<<EOF"
-            echo "${IMAGE}:${VERSION}"
+            echo "${IMAGE}:latest"
+            echo "${IMAGE}:upstream-${UPSTREAM_VERSION}"
+            echo "${IMAGE}:upstream-${UPSTREAM_SHORT}"
             echo "${IMAGE}:sha-${GITHUB_SHA::12}"
-            if [ "${GITHUB_REF}" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
-              echo "${IMAGE}:latest"
-            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          echo "Official OpenClacky: ${UPSTREAM_VERSION} (${UPSTREAM_DIGEST})"
+          echo "Previously packaged base: ${CURRENT_BASE_DIGEST:-none}"
+          echo "Publish: ${SHOULD_PUBLISH}"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: No upstream change
+        if: steps.meta.outputs.should_publish != 'true'
+        run: echo "The official OpenClacky image digest has not changed; nothing to publish."
 
-      - name: Build amd64 smoke-test image
+      - name: Build smoke-test image
+        if: steps.meta.outputs.should_publish == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -69,14 +84,20 @@ jobs:
           platforms: linux/amd64
           tags: local/openclacky:smoke-test
           build-args: |
-            OPENCLACKY_VERSION=${{ steps.meta.outputs.version }}
+            OPENCLACKY_IMAGE=${{ env.OFFICIAL_IMAGE }}@${{ steps.meta.outputs.upstream_digest }}
             SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
+            UPSTREAM_DIGEST=${{ steps.meta.outputs.upstream_digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify bundled CLIs
+      - name: Verify inherited OpenClacky and bundled CLIs
+        if: steps.meta.outputs.should_publish == 'true'
         run: |
           set -euo pipefail
+          ACTUAL_VERSION="$(docker run --rm --entrypoint ruby local/openclacky:smoke-test \
+            -e 'require "clacky"; print Clacky::VERSION')"
+          test "$ACTUAL_VERSION" = "${{ steps.meta.outputs.upstream_version }}"
+
           docker run --rm --entrypoint sh local/openclacky:smoke-test -c '
             set -eu
             for command in openclacky node npm npx corepack uv uvx curl git jq rg file patch xz unzip ps pgrep pkill lsof tini; do
@@ -85,12 +106,13 @@ jobs:
             node --version
             npm --version
             npx --version
+            corepack --version
             uv --version
             uvx --version
-            ruby -e "require %q[clacky]; puts Clacky::VERSION"
           '
 
       - name: Verify server health
+        if: steps.meta.outputs.should_publish == 'true'
         run: |
           set -euo pipefail
           docker run -d --name openclacky-smoke \
@@ -108,27 +130,32 @@ jobs:
           exit 1
 
       - name: Log in to GHCR
+        if: steps.meta.outputs.should_publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish multi-architecture image
+      - name: Publish amd64 image
+        if: steps.meta.outputs.should_publish == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
-            OPENCLACKY_VERSION=${{ steps.meta.outputs.version }}
+            OPENCLACKY_IMAGE=${{ env.OFFICIAL_IMAGE }}@${{ steps.meta.outputs.upstream_digest }}
             SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
+            UPSTREAM_DIGEST=${{ steps.meta.outputs.upstream_digest }}
           labels: |
             org.opencontainers.image.title=openclacky-standard
-            org.opencontainers.image.description=OpenClacky with common agent CLIs and amd64/arm64 support
+            org.opencontainers.image.description=The official OpenClacky image with common agent CLIs
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.upstream_version }}
+            org.opencontainers.image.base.name=${{ env.OFFICIAL_IMAGE }}
+            org.opencontainers.image.base.digest=${{ steps.meta.outputs.upstream_digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
