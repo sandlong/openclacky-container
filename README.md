@@ -1,35 +1,31 @@
 # OpenClacky standard container
 
-A thin extension of OpenClacky's official container image with a practical baseline of local tools and stdio MCP package runners.
+A multi-architecture OpenClacky image with a practical baseline of agent and stdio MCP tools.
 
-The image does **not** rebuild or pin a separate OpenClacky release. Its Dockerfile starts from:
-
-```dockerfile
-FROM ghcr.io/clacky-ai/openclacky:latest
+```bash
+docker pull ghcr.io/sandlong/openclacky:latest
 ```
 
-Each workflow run resolves that tag to an immutable digest, builds from that exact digest, and records it in the image label `org.opencontainers.image.base.digest`.
-
-## Added tools
+## What is added
 
 - Node.js 24 LTS, npm, `npx`, and Corepack
 - `uv` and `uvx`
 - `curl`, Git, `jq`, and `ripgrep`
 - `file`, `patch`, `xz`, and `unzip`
 - `procps`, `lsof`, and `tini`
-- Python 3
+- Python 3 and OpenClacky's existing `mise` capability
 
-OpenClacky's existing Ruby runtime and `mise` installation come directly from the official image.
+## Architecture design
 
-## Architecture
+The official image, `ghcr.io/clacky-ai/openclacky:latest`, currently publishes an amd64 runtime only. This repository nevertheless publishes native `linux/amd64` and `linux/arm64` images without rebuilding OpenClacky from source:
 
-The current official OpenClacky image is published only for `linux/amd64`, so this extension is also amd64-only. The Dockerfile can become conventionally multi-platform once upstream publishes an arm64 image; it intentionally does not transplant upstream files into a separately constructed arm64 runtime.
+1. Resolve the official `latest` tag to an immutable digest.
+2. Copy its exact `/usr/local/bundle` into a Ruby runtime matching the official Ruby version for each target architecture.
+3. Install architecture-native Node, uv, mise, system packages, and Ruby itself.
+4. Verify the OpenClacky bundle contains no native `.so` or `.bundle` files before publishing.
+5. Run CLI and HTTP health tests on both amd64 and arm64.
 
-## Pull
-
-```bash
-docker pull ghcr.io/sandlong/openclacky:latest
-```
+The workflow intentionally fails if upstream introduces an architecture-specific Ruby dependency. Once the official image itself supports arm64, this workaround can be replaced by a simpler direct wrapper around the official multi-architecture image.
 
 ## Run
 
@@ -39,25 +35,19 @@ docker run --rm -p 7070:7070 \
   ghcr.io/sandlong/openclacky:latest
 ```
 
-## Build locally
+## Updates and tags
 
-```bash
-docker build -t openclacky:standard .
-```
-
-## Publishing
-
-The workflow runs when `main` changes, on manual dispatch, and once per day. Scheduled runs compare the current official-image digest with the base digest recorded in the published image and skip rebuilding when nothing changed.
+The workflow checks the official image daily and rebuilds only when its digest changes. Pushes to `main` also publish immediately.
 
 Published tags include:
 
 - `latest`
 - `upstream-<OpenClacky version>`
-- `upstream-<official digest prefix>`
+- `upstream-<official image digest prefix>`
 - `sha-<repository commit>`
 
-Before publishing, the workflow verifies that the inherited OpenClacky version matches the official image, checks every bundled CLI, and tests the `/health` endpoint.
+Each image records the exact official payload digest and native Ruby runtime image in OCI labels.
 
 ## Relationship to upstream
 
-This repository is an independent container extension and is not affiliated with the OpenClacky project. OpenClacky remains licensed under its upstream license.
+This repository is an independent container build and is not affiliated with the OpenClacky project. OpenClacky remains licensed under its upstream license.
