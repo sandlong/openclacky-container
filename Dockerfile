@@ -30,7 +30,7 @@ RUN gem build openclacky.gemspec \
 FROM ${RUBY_IMAGE}
 
 ARG OPENCLACKY_VERSION=1.5.4
-ARG SOURCE_REPOSITORY=https://github.com/sandlong/openclacky-docker
+ARG SOURCE_REPOSITORY=https://github.com/sandlong/openclacky-container
 
 LABEL org.opencontainers.image.title="openclacky-standard" \
       org.opencontainers.image.description="OpenClacky with common agent CLIs and amd64/arm64 support" \

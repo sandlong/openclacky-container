@@ -33,6 +33,9 @@ jobs:
           set -euo pipefail
 
           VERSION="${{ inputs.openclacky_version }}"
+          if [ -z "$VERSION" ] && [ "${GITHUB_REF_TYPE}" = "tag" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
           if [ -z "$VERSION" ]; then
             VERSION="$(tr -d '[:space:]' < OPENCLACKY_VERSION)"
           fi
@@ -84,7 +87,7 @@ jobs:
             npx --version
             uv --version
             uvx --version
-            openclacky --version
+            ruby -e 'require "clacky"; puts Clacky::VERSION'
           '
 
       - name: Verify server health
