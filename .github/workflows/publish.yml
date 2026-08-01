@@ -87,7 +87,7 @@ jobs:
             npx --version
             uv --version
             uvx --version
-            ruby -e 'require "clacky"; puts Clacky::VERSION'
+            ruby -e "require %q[clacky]; puts Clacky::VERSION"
           '
 
       - name: Verify server health
