@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   schedule:
     # Check the official image daily; scheduled runs publish only after it changes.
-    - cron: "17 3 * * *"
+    - cron: "30 18 * * *"
 
 permissions:
   contents: read
