@@ -21,29 +21,148 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve upstream image
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+          manifest_metadata() {
+            local repository="$1"
+            local reference="$2"
+            local token headers body status digest
+
+            token="$(curl -fsSL --retry 4 --retry-all-errors --retry-delay 2 \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
+              | jq -er '.token // .access_token')"
+            headers="$(mktemp)"
+            body="$(mktemp)"
+
+            if ! status="$(curl -sS --retry 4 --retry-all-errors --retry-delay 2 \
+              -D "$headers" -o "$body" -w '%{http_code}' \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: ${ACCEPT}" \
+              "https://ghcr.io/v2/${repository}/manifests/${reference}")"; then
+              echo "Failed to query ghcr.io/${repository}:${reference}." >&2
+              cat "$body" >&2
+              rm -f "$headers" "$body"
+              return 1
+            fi
+
+            case "$status" in
+              200)
+                digest="$(awk 'tolower($1) == "docker-content-digest:" { gsub("\r", "", $2); print $2 }' "$headers")"
+                if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  echo "GHCR returned no valid digest for ${repository}:${reference}." >&2
+                  rm -f "$headers" "$body"
+                  return 1
+                fi
+                printf '200 %s\n' "$digest"
+                ;;
+              404)
+                printf '404\n'
+                ;;
+              *)
+                echo "GHCR returned HTTP ${status} for ${repository}:${reference}:" >&2
+                cat "$body" >&2
+                rm -f "$headers" "$body"
+                return 1
+                ;;
+            esac
+
+            rm -f "$headers" "$body"
+          }
+
+          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/${IMAGE_NAME}"
+          IMAGE_REPOSITORY="${IMAGE#ghcr.io/}"
+          UPSTREAM="${OFFICIAL_IMAGE#ghcr.io/}"
+          UPSTREAM_REFERENCE="${UPSTREAM##*:}"
+          UPSTREAM_REPOSITORY="${UPSTREAM%:*}"
+
+          read -r UPSTREAM_STATUS UPSTREAM_DIGEST <<< \
+            "$(manifest_metadata "$UPSTREAM_REPOSITORY" "$UPSTREAM_REFERENCE")"
+          if [ "$UPSTREAM_STATUS" != 200 ]; then
+            echo "Official image ${OFFICIAL_IMAGE} was not found." >&2
+            exit 1
+          fi
+
+          UPSTREAM_SHORT="${UPSTREAM_DIGEST#sha256:}"
+          UPSTREAM_SHORT="${UPSTREAM_SHORT:0:12}"
+          PUBLISHED_TAG="upstream-${UPSTREAM_SHORT}"
+          PUBLISHED_REF="${IMAGE}:${PUBLISHED_TAG}"
+          SHOULD_PUBLISH=true
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            read -r PUBLISHED_STATUS _ <<< \
+              "$(manifest_metadata "$IMAGE_REPOSITORY" "$PUBLISHED_TAG")"
+            if [ "$PUBLISHED_STATUS" = 200 ]; then
+              SHOULD_PUBLISH=false
+            fi
+          fi
+
+          {
+            echo "image=${IMAGE}"
+            echo "upstream_digest=${UPSTREAM_DIGEST}"
+            echo "upstream_short=${UPSTREAM_SHORT}"
+            echo "should_publish=${SHOULD_PUBLISH}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Official OpenClacky digest: ${UPSTREAM_DIGEST}"
+          echo "Previously published tag: ${PUBLISHED_REF}"
+          echo "Publish: ${SHOULD_PUBLISH}"
+
+      - name: No upstream change
+        if: steps.source.outputs.should_publish != 'true'
+        run: echo "The official OpenClacky image digest has not changed; nothing to publish."
+
       - name: Checkout
-        uses: actions/checkout@v4
+        if: steps.source.outputs.should_publish == 'true'
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        if: steps.source.outputs.should_publish == 'true'
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        if: steps.source.outputs.should_publish == 'true'
+        uses: docker/setup-buildx-action@v4
 
       - name: Resolve and validate upstream payload
+        if: steps.source.outputs.should_publish == 'true'
         id: meta
         shell: bash
         run: |
           set -euo pipefail
 
-          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE="ghcr.io/${OWNER_LC}/${IMAGE_NAME}"
-          UPSTREAM_DIGEST="$(docker buildx imagetools inspect "$OFFICIAL_IMAGE" | awk '/^Digest:/ {print $2; exit}')"
-          UPSTREAM_SHORT="${UPSTREAM_DIGEST#sha256:}"
-          UPSTREAM_SHORT="${UPSTREAM_SHORT:0:12}"
+          retry() {
+            local attempt status
+
+            for attempt in 1 2 3 4; do
+              if "$@"; then
+                return 0
+              else
+                status=$?
+              fi
+
+              if [ "$attempt" -eq 4 ]; then
+                echo "Command failed after ${attempt} attempts (exit ${status}): $*" >&2
+                return "$status"
+              fi
+
+              echo "Command failed (attempt ${attempt}/4, exit ${status}); retrying: $*" >&2
+              sleep $((attempt * 3))
+            done
+          }
+
+          IMAGE="${{ steps.source.outputs.image }}"
+          UPSTREAM_DIGEST="${{ steps.source.outputs.upstream_digest }}"
+          UPSTREAM_SHORT="${{ steps.source.outputs.upstream_short }}"
           UPSTREAM_REF="${OFFICIAL_IMAGE}@${UPSTREAM_DIGEST}"
 
-          docker pull --platform linux/amd64 "$UPSTREAM_REF" >/dev/null
+          retry docker pull --platform linux/amd64 "$UPSTREAM_REF" >/dev/null
           UPSTREAM_VERSION="$(docker run --rm --platform linux/amd64 --entrypoint ruby "$UPSTREAM_REF" \
             -e 'require "clacky"; print Clacky::VERSION')"
           RUBY_VERSION="$(docker run --rm --platform linux/amd64 --entrypoint ruby "$UPSTREAM_REF" \
@@ -58,23 +177,12 @@ jobs:
             exit 1
           fi
 
-          CURRENT_PAYLOAD_DIGEST=""
-          if docker pull --platform linux/amd64 "${IMAGE}:latest" >/dev/null 2>&1; then
-            CURRENT_PAYLOAD_DIGEST="$(docker image inspect "${IMAGE}:latest" \
-              --format '{{ index .Config.Labels "io.github.sandlong.openclacky.source.digest" }}' 2>/dev/null || true)"
-          fi
-
-          SHOULD_PUBLISH=true
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$CURRENT_PAYLOAD_DIGEST" = "$UPSTREAM_DIGEST" ]; then
-            SHOULD_PUBLISH=false
-          fi
-
           {
             echo "image=${IMAGE}"
             echo "upstream_digest=${UPSTREAM_DIGEST}"
             echo "upstream_version=${UPSTREAM_VERSION}"
             echo "ruby_version=${RUBY_VERSION}"
-            echo "should_publish=${SHOULD_PUBLISH}"
+            echo "should_publish=true"
             echo "tags<<EOF"
             echo "${IMAGE}:latest"
             echo "${IMAGE}:upstream-${UPSTREAM_VERSION}"
@@ -85,16 +193,11 @@ jobs:
 
           echo "Official OpenClacky: ${UPSTREAM_VERSION} (${UPSTREAM_DIGEST})"
           echo "Required native Ruby runtime: ${RUBY_VERSION}"
-          echo "Previously packaged payload: ${CURRENT_PAYLOAD_DIGEST:-none}"
-          echo "Publish: ${SHOULD_PUBLISH}"
-
-      - name: No upstream change
-        if: steps.meta.outputs.should_publish != 'true'
-        run: echo "The official OpenClacky image digest has not changed; nothing to publish."
+          echo "Publish: true"
 
       - name: Build amd64 smoke-test image
         if: steps.meta.outputs.should_publish == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -112,7 +215,7 @@ jobs:
 
       - name: Build arm64 smoke-test image
         if: steps.meta.outputs.should_publish == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -197,7 +300,7 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.meta.outputs.should_publish == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -205,7 +308,7 @@ jobs:
 
       - name: Publish multi-architecture image
         if: steps.meta.outputs.should_publish == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true

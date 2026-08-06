@@ -37,7 +37,7 @@ docker run --rm -p 7070:7070 \
 
 ## Updates and tags
 
-The workflow checks the official image daily and rebuilds only when its digest changes. Pushes to `main` also publish immediately.
+The workflow checks the official image daily and rebuilds only when its digest changes. An unchanged scheduled run performs only remote manifest checks; it does not create a builder, pull images, or run emulated containers. Pushes to `main` still publish immediately.
 
 Published tags include:
 
