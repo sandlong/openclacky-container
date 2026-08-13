@@ -57,10 +57,19 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 COPY --from=uv /uv /uvx /usr/local/bin/
 
-# Match the official image's mise installation, but install a native binary for
-# the target architecture rather than copying its amd64 executable.
-RUN curl -fsSL https://mise.run | sh
-ENV PATH="/root/.local/bin:${PATH}"
+# mise itself is image-level infrastructure. Tools installed after build are
+# instance-level state and live under the persistent /root/.clacky volume.
+RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+
+ENV MISE_DATA_DIR="/root/.clacky/mise/data" \
+    MISE_CONFIG_DIR="/root/.clacky/mise/config" \
+    MISE_STATE_DIR="/root/.clacky/mise/state" \
+    MISE_CACHE_DIR="/tmp/mise-cache" \
+    XDG_CONFIG_HOME="/root/.clacky/xdg/config" \
+    XDG_DATA_HOME="/root/.clacky/xdg/data" \
+    XDG_STATE_HOME="/root/.clacky/xdg/state" \
+    XDG_CACHE_HOME="/tmp/xdg-cache" \
+    PATH="/root/.clacky/mise/data/shims:${PATH}"
 
 VOLUME ["/root/.clacky"]
 EXPOSE 7070
