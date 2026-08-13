@@ -35,6 +35,24 @@ docker run --rm -p 7070:7070 \
   ghcr.io/sandlong/openclacky:latest
 ```
 
+## Persistent instance environment
+
+The image loads `/root/.clacky/.env` before OpenClacky starts. Because
+`/root/.clacky` is the persistent volume, instance-level credentials and other
+environment variables can survive container recreation without being repeated
+in every `docker run` command.
+
+```dotenv
+GITHUB_TOKEN=...
+CLOUDFLARE_API_TOKEN=...
+OPENAI_API_KEY=...
+```
+
+Blank lines, comments, quoted values, and optional `export KEY=value` syntax are
+supported. The file is parsed as data rather than sourced as a shell script, so
+it cannot execute commands. Variables already present in the container
+environment take precedence over values in `/root/.clacky/.env`.
+
 ## Updates and tags
 
 The workflow checks the official image daily and rebuilds only when its digest changes. An unchanged scheduled run performs only remote manifest checks; it does not create a builder, pull images, or run emulated containers. Pushes to `main` still publish immediately.

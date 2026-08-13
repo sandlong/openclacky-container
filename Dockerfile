@@ -57,6 +57,11 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 COPY --from=uv /uv /uvx /usr/local/bin/
 
+# Load instance-level environment variables from the persistent volume before
+# OpenClacky starts. Existing process environment variables take precedence.
+COPY docker-entrypoint.rb /usr/local/bin/openclacky-entrypoint
+RUN chmod 0755 /usr/local/bin/openclacky-entrypoint
+
 # mise itself is image-level infrastructure. Tools installed after build are
 # instance-level state and live under the persistent /root/.clacky volume.
 RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
@@ -77,5 +82,5 @@ EXPOSE 7070
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:7070/health || exit 1
 
-ENTRYPOINT ["tini", "--", "openclacky"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/openclacky-entrypoint"]
 CMD ["server", "--host", "0.0.0.0"]
