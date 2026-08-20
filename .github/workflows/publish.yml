@@ -275,15 +275,12 @@ jobs:
             local image="$1"
             local platform="$2"
             local name="$3"
-            local port="$4"
 
             docker run -d --platform "$platform" --name "$name" \
-              -e CLACKY_ACCESS_KEY= \
-              -p "${port}:7070" \
               "$image"
 
             for _ in $(seq 1 45); do
-              if curl -fsS "http://127.0.0.1:${port}/health" | grep -q '"status"'; then
+              if docker exec "$name" curl -fsS http://127.0.0.1:7070/health | grep -q '"status"'; then
                 docker rm -f "$name" >/dev/null
                 return 0
               fi
@@ -295,8 +292,8 @@ jobs:
             return 1
           }
 
-          verify_health local/openclacky:amd64-smoke linux/amd64 openclacky-amd64 7070
-          verify_health local/openclacky:arm64-smoke linux/arm64 openclacky-arm64 7071
+          verify_health local/openclacky:amd64-smoke linux/amd64 openclacky-amd64
+          verify_health local/openclacky:arm64-smoke linux/arm64 openclacky-arm64
 
       - name: Log in to GHCR
         if: steps.meta.outputs.should_publish == 'true'

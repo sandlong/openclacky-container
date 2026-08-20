@@ -30,10 +30,19 @@ The workflow intentionally fails if upstream introduces an architecture-specific
 ## Run
 
 ```bash
-docker run --rm -p 7070:7070 \
+docker run --rm --network host \
   -v openclacky-data:/root/.clacky \
   ghcr.io/sandlong/openclacky:latest
 ```
+
+The image preserves OpenClacky's native safe default and binds the server to
+`127.0.0.1:7070`. With host networking, the service therefore remains on the
+host loopback interface while remaining reachable to other host-networked
+services such as `cloudflared`.
+
+If bridge networking and Docker port publishing are required instead, override
+the server bind address explicitly (for example, `server --host 0.0.0.0`) and
+configure OpenClacky's access-key protection as appropriate.
 
 ## Persistent instance environment
 

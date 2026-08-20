@@ -83,4 +83,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:7070/health || exit 1
 
 ENTRYPOINT ["tini", "--", "/usr/local/bin/openclacky-entrypoint"]
-CMD ["server", "--host", "0.0.0.0"]
+CMD ["server"]
